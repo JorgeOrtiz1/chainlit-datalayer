@@ -1,4 +1,5 @@
 import chainlit as cl
+from chainlit.types import ThreadDict
 
 @cl.password_auth_callback
 def auth_callback(username: str, password: str):
@@ -11,10 +12,11 @@ def auth_callback(username: str, password: str):
     else:
         return None
 
-@cl.on_chat_resume
-async def on_chat_resume(thread):
-    pass
 
+
+@cl.on_chat_resume
+async def on_chat_resume(thread: ThreadDict):
+    print("The user resumed a previous chat session!")
 
 @cl.step(type="tool")
 async def tool():
