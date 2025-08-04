@@ -197,7 +197,7 @@ async def store_full_session():
     save_session_to_file(session_id,{
         "title": title,
         "summary": summary,
-        "full_log": log_text,
+        "full_log": chat_history,
         "timestamp": timestamp_now()
     })
 
