@@ -14,6 +14,9 @@ PG_USER = os.getenv("PG_USER")
 PG_PASSWORD = os.getenv("PG_PASSWORD")
 PG_DATABASE = os.getenv("PG_DATABASE")
 
+CHAT_SESSION_DIR = "chat_sessions"
+os.makedirs(CHAT_SESSION_DIR, exist_ok=True)
+
 @cl.password_auth_callback
 def auth_callback(username: str, password: str):
     # Fetch the user matching username from your database
@@ -32,54 +35,32 @@ client = AzureOpenAI(
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
 )
 DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME")
-SESSION_FILE = "chat_history.json"
+
 
 def timestamp_now():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def load_global_sessions():
-    if os.path.exists(SESSION_FILE):
-        try:
-            with open(SESSION_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            print("⚠️ Corrupted JSON file. Starting fresh.")
-            return []
-    return []
-
-def save_global_session(new_session):
+def save_session_to_file(session_id: str, session_data: dict):
+    path = os.path.join("chat_sessions", f"{session_id}.json")
     try:
-        sessions = load_global_sessions()
-        sessions.append(new_session)
-        with open(SESSION_FILE, "w", encoding="utf-8") as f:
-            json.dump(sessions, f, indent=2)
-        print(f"✅ Session saved. Total sessions: {len(sessions)}")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(session_data, f, indent=2)
+        print(f"✅ Session {session_id} saved to {path}")
     except Exception as e:
         print(f"❌ Error saving session: {e}")
 
 
-def get_last_session_messages():
-    sessions = load_global_sessions()
-    if not sessions:
-        return []
+def parse_log(log_text):
+    try:
+        if isinstance(log_text, str):
+            log = json.loads(log_text)
+        else:
+            log = log_text
+        return [{"type": msg["type"], "content": msg["content"], "author": msg["author"], "timestamp": msg["timestamp"]} for msg in log]
 
-    last_log = sessions[-1]["full_log"]
-    messages = []
-    for line in last_log.split("\n"):
-        if not line.strip():
-            continue
-        try:
-            # Format: [YYYY-MM-DD HH:MM:SS] Role: Message
-            timestamp_end = line.find("]")
-            role_start = timestamp_end + 2
-            role_end = line.find(":", role_start)
-            role = line[role_start:role_end].strip().lower()
-            content = line[role_end + 1:].strip()
-            if role in ["user", "assistant"]:
-                messages.append({"role": role, "content": content})
-        except Exception as e:
-            print(f"⚠️ Skipping malformed log line: {line}")
-    return messages
+    except Exception as e:
+        print(f"❌ Error parsing log: {e}")
+        return []
 
 def get_pg_connection():
     return psycopg2.connect(
@@ -113,25 +94,36 @@ def update_session_title(session_id: str, new_title: str):
 async def on_chat_start():
     session_id = cl.context.session.id
     cl.user_session.set("session_id", session_id)
+    cl.user_session.set("chat_history", [])
 
 @cl.on_chat_resume
 async def on_chat_resume(thread: ThreadDict):
-    # ✅ Store the thread.id into user session so we can later update the DB
-    cl.user_session.set("session_id", thread["id"])
+    session_id = thread["id"]
+    cl.user_session.set("session_id", session_id)
 
-    prev_messages = get_last_session_messages()
+    path = os.path.join("chat_sessions", f"{session_id}.json")
 
-    if prev_messages:
-        cl.user_session.set("chat_history", prev_messages)
-        await cl.Message(content="✅ Previous session history loaded.").send()
+    chat_history = [] 
+
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            session_data = json.load(f)
+
+        chat_history = parse_log(session_data["full_log"])
+        cl.user_session.set("chat_history", chat_history)
+        print(f"✅ Resumed session {session_id}")
     else:
-        cl.user_session.set("chat_history", [])
-        await cl.Message(content="⚠️ No previous session history found. Starting fresh.").send()
+        print(f"⚠️ No file found for session id: {session_id}. Path checked: {path}")
+        await cl.Message("⚠️ No saved log found for this session. Starting fresh.").send()
 
 
 @cl.on_message  # this function will be called every time a user inputs a message in the UI
 async def main(message: cl.Message):
-    chat_history = cl.user_session.get("chat_history") or []
+    # session_id = cl.user_session.get("session_id")
+    chat_history = cl.user_session.get("chat_history")
+    if chat_history is None:
+        chat_history = []
+
     chat_history.append({"role":"user", "content": message.content, "timestamp": timestamp_now()})
 
     messages = [
@@ -170,7 +162,7 @@ async def store_full_session():
 
     # Title generation
     title_prompt = [
-        {"role": "system", "content": "Write a short 5–8 word title for this chat."},
+        {"role": "system", "content": "Write a short 5–6 word title for this chat."},
         {"role": "user", "content": log_text}
     ]
     title_response = client.chat.completions.create(
@@ -180,16 +172,11 @@ async def store_full_session():
     title = title_response.choices[0].message.content.strip().title()
 
     session_id = cl.user_session.get("session_id")  # or wherever you store it
-    print(session_id)
+    chat_history = cl.user_session.get("chat_history") or []
 
     if session_id: 
-        # Update the session title in the database
-        update_session_title(session_id, title) 
-        # As a fallback: set a metadata flag to tell frontend the title changed
-        print(f"✅ Session title updated to '{title}' for session id {session_id}")
-        await cl.Message(f"✅ Updated session title to: **{title}**").send()
-
-        
+        path = os.path.join(CHAT_SESSION_DIR, f"{session_id}.json")
+        print(f"✅ Session {session_id} saved to {path}")    
     else:
         print("⚠️ No session_id found in user_session; skipping DB title update")
 
@@ -207,7 +194,7 @@ async def store_full_session():
 
     
     # Save to file
-    save_global_session({
+    save_session_to_file(session_id,{
         "title": title,
         "summary": summary,
         "full_log": log_text,
