@@ -36,6 +36,8 @@ client = AzureOpenAI(
 )
 DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME")
 
+def get_session_path(session_id: str) -> str:
+    return os.path.join("chat_sessions", f"{session_id}.json")
 
 def timestamp_now():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -97,25 +99,27 @@ async def on_chat_start():
     cl.user_session.set("chat_history", [])
 
 @cl.on_chat_resume
-async def on_chat_resume(thread: ThreadDict):
-    session_id = thread["id"]
-    cl.user_session.set("session_id", session_id)
+async def on_chat_resume():
+    session_id = cl.user_session.get("id")
+    session_path = get_session_path(session_id)
 
-    path = os.path.join("chat_sessions", f"{session_id}.json")
+    if not os.path.exists(session_path):
+        return
 
-    chat_history = [] 
+    
+    with open(session_path, "r", encoding="utf-8") as f:
+        session_data = json.load(f)
 
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            session_data = json.load(f)
+    chat_history = session_data.get("chat_history", [])
 
-        chat_history = parse_log(session_data["full_log"])
-        cl.user_session.set("chat_history", chat_history)
-        print(f"✅ Resumed session {session_id}")
-    else:
-        print(f"⚠️ No file found for session id: {session_id}. Path checked: {path}")
-        await cl.Message("⚠️ No saved log found for this session. Starting fresh.").send()
+    if chat_history:
+        for message in chat_history:
+            if message["role"] == "assistant":
+                await cl.Message(content=message["content"]).send()
 
+    # ✅ Set the chat history in memory so future messages can append to it
+    cl.user_session.set("chat_history", chat_history)
+    
 
 @cl.on_message  # this function will be called every time a user inputs a message in the UI
 async def main(message: cl.Message):
