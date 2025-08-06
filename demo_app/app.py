@@ -1,12 +1,12 @@
 import os
 import json
+import httpx
 import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 import chainlit as cl
-from chainlit.types import ThreadDict
 
 PG_HOST = os.getenv("PG_HOST", "localhost")
 PG_PORT = os.getenv("PG_PORT", "5432")
@@ -51,6 +51,19 @@ def save_session_to_file(session_id: str, session_data: dict):
     except Exception as e:
         print(f"❌ Error saving session: {e}")
 
+async def rename_thread(thread_id: str, title: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "http://localhost:8000/project/thread",
+            json={"threadId": thread_id, "name": title},
+            timeout=5.0
+        )
+
+    if response.status_code == 200:
+        print(f"✅ Title updated to: {title}")
+    else:
+        print(f"❌ Failed to update title: {response.status_code} {response.text}")
+    
 
 def parse_log(log_text):
     try:
@@ -100,7 +113,7 @@ async def on_chat_start():
 
 @cl.on_chat_resume
 async def on_chat_resume():
-    session_id = cl.user_session.get("id")
+    session_id = cl.user_session.get("session_id")
     session_path = get_session_path(session_id)
 
     if not os.path.exists(session_path):
@@ -166,7 +179,7 @@ async def store_full_session():
 
     # Title generation
     title_prompt = [
-        {"role": "system", "content": "Write a short 5–6 word title for this chat."},
+        {"role": "system", "content": "Write a short 1–5 word title for this chat."},
         {"role": "user", "content": log_text}
     ]
     title_response = client.chat.completions.create(
@@ -175,14 +188,24 @@ async def store_full_session():
     )
     title = title_response.choices[0].message.content.strip().title()
 
-    session_id = cl.user_session.get("session_id")  # or wherever you store it
-    chat_history = cl.user_session.get("chat_history") or []
-
-    if session_id: 
-        path = os.path.join(CHAT_SESSION_DIR, f"{session_id}.json")
-        print(f"✅ Session {session_id} saved to {path}")    
-    else:
+    session_id = cl.user_session.get("session_id")  # or wherever you store it\
+    if not session_id:
         print("⚠️ No session_id found in user_session; skipping DB title update")
+        return
+    
+    try:
+        await rename_thread(session_id, title)
+    except Exception as e:
+        print(f"⚠️ Rename failed, continuing anyway: {e}")
+
+    # Update the session title in the database
+    update_session_title(session_id, title)
+    cl.user_session.set("thread", {
+        "id": session_id,
+        "name": title
+    })
+    
+    print("🧵 Thread updated:", cl.user_session.get("thread"))
 
 
     # Summary generation
@@ -205,4 +228,4 @@ async def store_full_session():
         "timestamp": timestamp_now()
     })
 
-    
+    print(f"✅ Session {session_id} saved with title '{title}' and summary.")
