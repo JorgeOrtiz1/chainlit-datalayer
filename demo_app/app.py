@@ -52,10 +52,15 @@ def save_session_to_file(session_id: str, session_data: dict):
         print(f"❌ Error saving session: {e}")
 
 async def rename_thread(thread_id: str, title: str):
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
+    access_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZGVudGlmaWVyIjoiYWRtaW4iLCJkaXNwbGF5X25hbWUiOm51bGwsIm1ldGFkYXRhIjp7InJvbGUiOiJhZG1pbiIsInByb3ZpZGVyIjoiY3JlZGVudGlhbHMifSwiZXhwIjoxNzU1MjY5NTY2LCJpYXQiOjE3NTM5NzM1NjZ9.vPtgJmossWAnJ9SFEOK-Tup0fbGkvUOpUY5rfJjPTCA"  # paste from browser cookie
+
+    cookies = {"access_token": access_token}
+
+
+    async with httpx.AsyncClient(cookies=cookies) as client:
+        response = await client.put(
             "http://localhost:8000/project/thread",
-            json={"threadId": thread_id, "name": title},
+            json={"threadid": thread_id, "name": title},
             timeout=5.0
         )
 
