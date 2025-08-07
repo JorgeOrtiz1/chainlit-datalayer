@@ -23,14 +23,17 @@ os.makedirs(CHAT_SESSION_DIR, exist_ok=True)
 
 @cl.password_auth_callback
 def auth_callback(username: str, password: str):
-    # Fetch the user matching username from your database
-    # and compare the hashed password with the value stored in the database
     if (username, password) == ("admin", "admin"):
-        return cl.User(
-            identifier="admin", metadata={"role": "admin", "provider": "credentials"}
-        )
-    else:
-        return None
+        # Chainlit will automatically attach a token to the browser
+        user = cl.User(identifier="admin", metadata={"role": "admin", "provider": "credentials"})
+
+        # Store access token in session
+        access_token = os.getenv("CHAINLIT_AUTH_TOKEN")  # Optional fallback if you store one
+        if access_token:
+            cl.user_session.set("access_token", access_token)
+
+        return user
+    return None
     
 # Azure OpenAI configuration    
 client = AzureOpenAI(
@@ -129,7 +132,7 @@ def update_session_title(session_id: str, new_title: str):
         if conn:
             conn.close()
 
-async def create_thread(session_id: str, title: str, access_token: str, max_retries: int = 3):
+async def create_thread(session_id: str, title: str, access_token: str = None, max_retries: int = 3):
 
     payload = {
         "id": session_id,
@@ -138,10 +141,14 @@ async def create_thread(session_id: str, title: str, access_token: str, max_retr
         "metadata": {},
     }
 
-    headers = {
-        "Content-Type": "application/json",
-        "Cookie": f"access_token={access_token}"
-    }
+    # headers = {
+    #     "Content-Type": "application/json",
+    #     "Cookie": f"access_token={access_token}"
+    # }
+
+    headers = {}
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -190,10 +197,18 @@ async def on_chat_start():
     session_id = cl.context.session.id
     cl.user_session.set("session_id", session_id)
     cl.user_session.set("chat_history", [])
+    
+    access_token = os.getenv("ACCESS_TOKEN")
+    cl.user_session.set("access_token", access_token)
+    
     cl.user_session.set("thread", {
         "id": session_id,
         "name": "New Chat"
     })
+    title = "New Session" 
+
+
+    await create_thread(session_id, title, access_token)
     print(f"🟢 New chat started with session_id: {session_id}")
     
     
@@ -295,7 +310,7 @@ async def store_full_session():
 
     await create_thread(session_id, title, access_token)
     try:
-        await rename_thread(session_id, title)
+        await rename_thread(session_id, title, access_token)
     except Exception as e:
         print(f"⚠️ Rename failed, continuing anyway: {e}")
 
