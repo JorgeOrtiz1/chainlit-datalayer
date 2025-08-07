@@ -1,12 +1,16 @@
 import os
 import json
 import httpx
+import asyncio
 import datetime
 import psycopg2
+import http.cookies
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 import chainlit as cl
+from uuid import UUID
+import uuid
 
 PG_HOST = os.getenv("PG_HOST", "localhost")
 PG_PORT = os.getenv("PG_PORT", "5432")
@@ -51,23 +55,38 @@ def save_session_to_file(session_id: str, session_data: dict):
     except Exception as e:
         print(f"❌ Error saving session: {e}")
 
-async def rename_thread(thread_id: str, title: str):
-    access_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZGVudGlmaWVyIjoiYWRtaW4iLCJkaXNwbGF5X25hbWUiOm51bGwsIm1ldGFkYXRhIjp7InJvbGUiOiJhZG1pbiIsInByb3ZpZGVyIjoiY3JlZGVudGlhbHMifSwiZXhwIjoxNzU1MjY5NTY2LCJpYXQiOjE3NTM5NzM1NjZ9.vPtgJmossWAnJ9SFEOK-Tup0fbGkvUOpUY5rfJjPTCA"  # paste from browser cookie
+async def rename_thread(thread_id: str, title: str, access_token: str, max_retries: int = 3):
+    headers = {
+        "Authorization": f"Bearer {access_token}"
+    }
 
-    cookies = {"access_token": access_token}
+    payload = {
+        "threadId": thread_id,
+        "name": title
+    }
 
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.put(
+                    "http://localhost:8000/project/thread",
+                    json=payload,
+                    headers=headers
+                )
 
-    async with httpx.AsyncClient(cookies=cookies) as client:
-        response = await client.put(
-            "http://localhost:8000/project/thread",
-            json={"threadid": thread_id, "name": title},
-            timeout=5.0
-        )
+            if response.status_code == 200:
+                print(f"✅ Title updated to: {title}")
+                return True
+            else:
+                print(f"⚠️ Attempt {attempt}: Failed to rename thread - {response.status_code} {response.text}")
 
-    if response.status_code == 200:
-        print(f"✅ Title updated to: {title}")
-    else:
-        print(f"❌ Failed to update title: {response.status_code} {response.text}")
+        except httpx.RequestError as e:
+            print(f"⚠️ Attempt {attempt}: Request error while renaming thread: {e}")
+
+        await asyncio.sleep(1)
+
+    print("❌ All retry attempts failed. Title was not updated.")
+    return False
     
 
 def parse_log(log_text):
@@ -110,12 +129,74 @@ def update_session_title(session_id: str, new_title: str):
         if conn:
             conn.close()
 
+async def create_thread(session_id: str, title: str, access_token: str, max_retries: int = 3):
+
+    payload = {
+        "id": session_id,
+        "name": title,
+        "tags": [],
+        "metadata": {},
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Cookie": f"access_token={access_token}"
+    }
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post("http://localhost:8000/project/thread", json=payload, headers=headers)
+
+            if response.status_code == 200:
+                print(f"✅ Thread created with id: {session_id}")
+                return True
+            else:
+                print(f"⚠️ Attempt {attempt}: Failed to create thread - {response.status_code} {response.text}")
+
+        except httpx.RequestError as e:
+            print(f"⚠️ Attempt {attempt}: Request error while creating thread: {e}")
+
+        await asyncio.sleep(1)  # Small delay before retry
+
+    print("❌ All retry attempts failed. Thread was not created.")
+    return False
+
+def get_access_token():
+    # First try from Chainlit session (if set earlier)
+    token = cl.user_session.get("access_token")
+    if token:
+        return token
+
+    # Fallback: Try to read from local cookies (only for dev environments)
+    cookie_file = os.path.expanduser("~/.chainlit/cookies.txt")
+    if os.path.exists(cookie_file):
+        try:
+            with open(cookie_file, "r") as f:
+                cookies = http.cookies.SimpleCookie()
+                cookies.load(f.read())
+                if "access_token" in cookies:
+                    return cookies["access_token"].value
+        except Exception as e:
+            print(f"⚠️ Failed to parse cookies: {e}")
+
+    print("⚠️ access_token not found.")
+    return None
+
+
+
 @cl.on_chat_start
 async def on_chat_start():
     session_id = cl.context.session.id
     cl.user_session.set("session_id", session_id)
     cl.user_session.set("chat_history", [])
-
+    cl.user_session.set("thread", {
+        "id": session_id,
+        "name": "New Chat"
+    })
+    print(f"🟢 New chat started with session_id: {session_id}")
+    
+    
 @cl.on_chat_resume
 async def on_chat_resume():
     session_id = cl.user_session.get("session_id")
@@ -146,6 +227,8 @@ async def main(message: cl.Message):
     if chat_history is None:
         chat_history = []
 
+    
+    
     chat_history.append({"role":"user", "content": message.content, "timestamp": timestamp_now()})
 
     messages = [
@@ -175,29 +258,42 @@ async def store_full_session():
     chat_history = cl.user_session.get("chat_history") or []
     if not chat_history:
         return
-
-    # Full readable chat log
-    log_text = "\n".join(
-        f"[{m['timestamp']}] {m['role'].capitalize()}: {m['content']}"
-        for m in chat_history
-    )
-
-    # Title generation
-    title_prompt = [
-        {"role": "system", "content": "Write a short 1–5 word title for this chat."},
-        {"role": "user", "content": log_text}
-    ]
-    title_response = client.chat.completions.create(
-        model=DEPLOYMENT_NAME,
-        messages=title_prompt
-    )
-    title = title_response.choices[0].message.content.strip().title()
-
+    
     session_id = cl.user_session.get("session_id")  # or wherever you store it\
     if not session_id:
         print("⚠️ No session_id found in user_session; skipping DB title update")
         return
     
+    # Access token (automated)
+    access_token = get_access_token()
+    if not access_token:
+        print("⚠️ No access_token found. Skipping thread ops.")
+        return
+    
+    # Full readable chat log
+    log_text = "\n".join(
+        f"[{m['timestamp']}] {m['role'].capitalize()}: {m['content']}"
+        for m in chat_history
+    )
+    
+    # Title generation
+    try:
+        title_prompt = [
+            {"role": "system", "content": "Write a short 1–5 word title for this chat."},
+            {"role": "user", "content": log_text}
+        ]
+        title_response = client.chat.completions.create(
+            model=DEPLOYMENT_NAME,
+            messages=title_prompt
+        )
+        title = title_response.choices[0].message.content.strip().title()
+    except Exception as e:
+        print(f"⚠️ Title generation failed: {e}")
+        title = "Untitled Session"
+
+
+
+    await create_thread(session_id, title, access_token)
     try:
         await rename_thread(session_id, title)
     except Exception as e:
